@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <numeric>
 #include <fstream>
 #include <algorithm>
 #include <random>
@@ -75,8 +76,40 @@ public:
         dW2.setZero(); db2.setZero();
         dW3.setZero(); db3.setZero();
     }
+    void save(const std::string& filename) {
+        std::ofstream out(filename, std::ios::binary);
+        if (out.is_open()) {
+            auto writeMatrix = [&](const Matrix& m) {
+                long rows = m.rows(), cols = m.cols();
+                out.write((char*)&rows, sizeof(long));
+                out.write((char*)&cols, sizeof(long));
+                out.write((char*)m.data(), rows * cols * sizeof(double));
+            };
+
+            writeMatrix(W1); writeMatrix(b1);
+            writeMatrix(W2); writeMatrix(b2);
+            writeMatrix(W3); writeMatrix(b3);
+            out.close();
+        }
+    }
+    void load(const std::string& filename) {
+        std::ifstream in(filename, std::ios::binary);
+        if (in.is_open()) {
+            auto readMatrix = [&](auto& m) {
+                long rows, cols;
+                in.read((char*)&rows, sizeof(long));
+                in.read((char*)&cols, sizeof(long));
+                m.resize(rows, cols);
+                in.read((char*)m.data(), rows * cols * sizeof(double));
+            };
+
+            readMatrix(W1); readMatrix(b1);
+            readMatrix(W2); readMatrix(b2);
+            readMatrix(W3); readMatrix(b3);
+            in.close();
+        }
+    }
 };
-//Loads the actual training data for the NN
 std::vector<Vector> loadImages(std::string path) {
     std::ifstream file(path, std::ios::binary);
     int magic = 0, n = 0, r = 0, c = 0;
@@ -108,4 +141,25 @@ std::vector<Vector> loadLabels(std::string path) {
         lbls[i]((int)label) = 1.0;
     }
     return lbls;
+}
+int main(){
+    std::vector<Vector> train_images = loadImages("train-images-idx3-ubyte");
+    std::vector<Vector> train_labels = loadLabels("train-labels-idx1-ubyte");
+    int batchsize = 32;
+    double learningrate = 0.05;
+    int epochs = 5;
+    NeuralNetwork nn(784,32,16,10);
+    for (int e{}; e < epochs; e++) {
+        for (int i{}; i < (int)train_images.size(); i += batchsize) {
+            int current_batch = std::min(batchsize, (int)train_images.size() - i);
+            
+            for (int b{}; b < current_batch; b++) {
+                nn.forward(train_images[i + b]);
+                nn.backward(train_images[i + b], train_labels[i + b]);
+            }
+            nn.applyGradients(learningrate, current_batch);
+        }
+    }
+    nn.save("mnist_model.bin");
+    return 0;
 }
