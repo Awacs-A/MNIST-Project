@@ -1,13 +1,14 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
-#include <numeric>
 #include <fstream>
 #include <algorithm>
 #include <random>
+#include <numeric>
 #include <Eigen/Dense>
 using Matrix = Eigen::MatrixXd;
 using Vector = Eigen::VectorXd;
+using Index = Eigen::Index;
 int reverseInt(int i) {
     unsigned char c1, c2, c3, c4;
     c1 = i & 255; c2 = (i >> 8) & 255; c3 = (i >> 16) & 255; c4 = (i >> 24) & 255;
@@ -53,7 +54,6 @@ public:
     Vector ReLUDerivative(const Vector& x) {
         return (x.array() > 0).cast<double>().matrix();
     }
-
     void backward(const Vector& x, const Vector& target) {
         Vector delta3 = (a3 - target).cwiseProduct(SigmoidDerivative(a3));
         Vector delta2 = (W3.transpose() * delta3).cwiseProduct(ReLUDerivative(z2));
@@ -77,37 +77,41 @@ public:
         dW3.setZero(); db3.setZero();
     }
     void save(const std::string& filename) {
-        std::ofstream out(filename, std::ios::binary);
-        if (out.is_open()) {
-            auto writeMatrix = [&](const Matrix& m) {
-                long rows = m.rows(), cols = m.cols();
-                out.write((char*)&rows, sizeof(long));
-                out.write((char*)&cols, sizeof(long));
-                out.write((char*)m.data(), rows * cols * sizeof(double));
+        std::ofstream ofs(filename, std::ios::binary);
+        auto saveWeights = [&](const auto& m) {
+            Index rows = m.rows(), cols = m.cols();
+            ofs.write((char*)&rows, sizeof(Index));
+            ofs.write((char*)&cols, sizeof(Index));
+            ofs.write((char*)m.data(), rows * cols * sizeof(double));
             };
 
-            writeMatrix(W1); writeMatrix(b1);
-            writeMatrix(W2); writeMatrix(b2);
-            writeMatrix(W3); writeMatrix(b3);
-            out.close();
-        }
+        saveWeights(W1); saveWeights(W2); saveWeights(W3);
+        saveWeights(b1); saveWeights(b2); saveWeights(b3);
+
+        ofs.close();
     }
     void load(const std::string& filename) {
-        std::ifstream in(filename, std::ios::binary);
-        if (in.is_open()) {
-            auto readMatrix = [&](auto& m) {
-                long rows, cols;
-                in.read((char*)&rows, sizeof(long));
-                in.read((char*)&cols, sizeof(long));
-                m.resize(rows, cols);
-                in.read((char*)m.data(), rows * cols * sizeof(double));
+        std::ifstream ifs(filename, std::ios::binary);
+        if (!ifs.is_open()) {
+            std::cerr << "Error: Could not open model file " << filename << std::endl;
+            return;
+        }
+
+        auto loadWeights = [&](auto& m) {
+            Eigen::Index rows, cols;
+            ifs.read((char*)&rows, sizeof(Eigen::Index));
+            ifs.read((char*)&cols, sizeof(Eigen::Index));
+
+            m.resize(rows, cols);
+            ifs.read((char*)m.data(), rows * cols * sizeof(double));
             };
 
-            readMatrix(W1); readMatrix(b1);
-            readMatrix(W2); readMatrix(b2);
-            readMatrix(W3); readMatrix(b3);
-            in.close();
-        }
+        loadWeights(W1); loadWeights(W2); loadWeights(W3);
+
+        loadWeights(b1); loadWeights(b2); loadWeights(b3);
+
+        ifs.close();
+        std::cout << "Model loaded successfully from " << filename << std::endl;
     }
 };
 std::vector<Vector> loadImages(std::string path) {
@@ -142,24 +146,73 @@ std::vector<Vector> loadLabels(std::string path) {
     }
     return lbls;
 }
-int main(){
-    std::vector<Vector> train_images = loadImages("train-images-idx3-ubyte");
-    std::vector<Vector> train_labels = loadLabels("train-labels-idx1-ubyte");
+int main() {
+    std::cout << "Do you want to save(0) or load(1)?" << '\n';
+    int n; std::cin >> n;
+    std::cout << "Loading MNIST dataset..." << '\n';
+    std::vector<Vector> train_images = loadImages("train-images.idx3-ubyte");
+    std::vector<Vector> train_labels = loadLabels("train-labels.idx1-ubyte");
+
+    std::vector<Vector> test_images = loadImages("t10k-images.idx3-ubyte");
+    std::vector<Vector> test_labels = loadLabels("t10k-labels.idx1-ubyte");
+
     int batchsize = 32;
     double learningrate = 0.05;
     int epochs = 5;
-    NeuralNetwork nn(784,32,16,10);
-    for (int e{}; e < epochs; e++) {
-        for (int i{}; i < (int)train_images.size(); i += batchsize) {
-            int current_batch = std::min(batchsize, (int)train_images.size() - i);
-            
-            for (int b{}; b < current_batch; b++) {
-                nn.forward(train_images[i + b]);
-                nn.backward(train_images[i + b], train_labels[i + b]);
+    NeuralNetwork nn(784, 32, 16, 10);
+    if (!n) {
+        std::vector<int> indices(train_images.size());
+        std::iota(indices.begin(), indices.end(), 0);
+        std::random_device rd;
+        std::mt19937 g(rd());
+
+        std::cout << "Starting Training..." << '\n';
+        for (int e = 0; e < epochs; e++) {
+            std::shuffle(indices.begin(), indices.end(), g);
+
+            for (int i = 0; i < (int)train_images.size(); i += batchsize) {
+                int current_batch = std::min(batchsize, (int)train_images.size() - i);
+
+                for (int b = 0; b < current_batch; b++) {
+                    int idx = indices[i + b];
+                    nn.forward(train_images[idx]);
+                    nn.backward(train_images[idx], train_labels[idx]);
+                }
+                nn.applyGradients(learningrate, current_batch);
             }
-            nn.applyGradients(learningrate, current_batch);
+
+            int correct = 0;
+            for (int i = 0; i < (int)test_images.size(); i++) {
+                Vector output = nn.forward(test_images[i]);
+                int prediction, actual;
+                output.maxCoeff(&prediction);
+                test_labels[i].maxCoeff(&actual);
+                if (prediction == actual) correct++;
+            }
+
+            std::cout << "Epoch " << e + 1 << " Accuracy: "
+                << (double)correct / test_images.size() * 100.0 << "%" << '\n';
         }
+
+        nn.save("mnist_model.bin");
+        std::cout << "Training complete. Current model saved" << '\n';
     }
-    nn.save("mnist_model.bin");
+    else {
+        nn.load("mnist_model.bin");
+
+        std::cout << "Testing loaded model..." << '\n';
+        std::vector<Vector> test_images = loadImages("t10k-images.idx3-ubyte");
+        std::vector<Vector> test_labels = loadLabels("t10k-labels.idx1-ubyte");
+
+        int correct = 0;
+        for (int i = 0; i < (int)test_images.size(); i++) {
+            Vector output = nn.forward(test_images[i]);
+            int prediction, actual;
+            output.maxCoeff(&prediction);
+            test_labels[i].maxCoeff(&actual);
+            if (prediction == actual) correct++;
+        }
+        std::cout << "Loaded Model Accuracy: " << (double)correct / test_images.size() * 100.0 << "%" << '\n';
+    }
     return 0;
 }
