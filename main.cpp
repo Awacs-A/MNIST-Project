@@ -6,9 +6,11 @@
 #include <random>
 #include <numeric>
 #include <Eigen/Dense>
+#include <vector>
 using Matrix = Eigen::MatrixXd;
 using Vector = Eigen::VectorXd;
 using Index = Eigen::Index;
+//g++ -O3 -I /usr/include/eigen3 NN.cpp -o NN
 int reverseInt(int i) {
     unsigned char c1, c2, c3, c4;
     c1 = i & 255; c2 = (i >> 8) & 255; c3 = (i >> 16) & 255; c4 = (i >> 24) & 255;
@@ -16,102 +18,140 @@ int reverseInt(int i) {
 }
 class NeuralNetwork {
 public:
-    Matrix W1, W2, W3;
-    Vector b1, b2, b3;
-    Vector z1, a1, z2, a2, z3, a3;
-    // Accumulators for Batch Averaging
-    Matrix dW1, dW2, dW3;
-    Vector db1, db2, db3;
-    NeuralNetwork(int inputsize, int h1, int h2, int outputsize) {
-        W1 = Matrix::Random(h1, inputsize) * std::sqrt(2.0 / inputsize);
-        b1 = Vector::Zero(h1);
+    std::vector<Matrix> W, mW, vW;
+    std::vector<Vector> b, mb, vb;
 
-        W2 = Matrix::Random(h2, h1) * std::sqrt(2.0 / h1);
-        b2 = Vector::Zero(h2);
 
-        W3 = Matrix::Random(outputsize, h2) * std::sqrt(2.0 / h2);
-        b3 = Vector::Zero(outputsize);
-        dW1 = Matrix::Zero(h1, inputsize);
-        db1 = Vector::Zero(h1);
-        dW2 = Matrix::Zero(h2, h1);
-        db2 = Vector::Zero(h2);
-        dW3 = Matrix::Zero(outputsize, h2);
-        db3 = Vector::Zero(outputsize);
+    // Values stored during forward pass for backpropagation
+    std::vector<Vector> z, a;
+    int BatchSize;
+    // Gradient accumulators
+    std::vector<Matrix> dW;
+    std::vector<Vector> db;
+    int t{};
+    NeuralNetwork(const std::vector<int>& layers, int bt) {
+        for (size_t i = 0; i < layers.size() - 1; ++i) {
+            int in = layers[i], out = layers[i + 1];
+
+            W.push_back(Matrix::Random(out, in) * std::sqrt(2.0 / in));
+            b.push_back(Vector::Zero(out));
+
+            // Initialize Adam moments to zero
+            mW.push_back(Matrix::Zero(out, in));
+            vW.push_back(Matrix::Zero(out, in));
+            mb.push_back(Vector::Zero(out));
+            vb.push_back(Vector::Zero(out));
+
+            dW.push_back(Matrix::Zero(out, in));
+            db.push_back(Vector::Zero(out));
+        }
+        z.resize(W.size());
+        a.resize(W.size());
+        BatchSize = bt;
     }
     Vector forward(const Vector& x) {
-        z1 = (W1 * x) + b1;
-        a1 = z1.unaryExpr([](double v) { return std::max(0.0, v); });// ReLU activation
-        z2 = (W2 * a1) + b2;
-        a2 = z2.unaryExpr([](double v) { return std::max(0.0, v); });// ReLU activation
+        for (size_t i = 0; i < W.size(); ++i) {
+            const Vector& prev_a = (i == 0) ? x : a[i - 1];
+            z[i] = (W[i] * prev_a) + b[i];
 
-        z3 = (W3 * a2) + b3;
-        a3 = z3.unaryExpr([](double v) { return 1.0 / (1.0 + std::exp(-v)); });// Sigmoid Activation
-        return a3;// The networks final guess of the number
+            if (i == W.size() - 1) {
+                // Softmax for the output layer
+                double max_val = z[i].maxCoeff();
+                Vector exp_z = (z[i].array() - max_val).exp();
+                a[i] = exp_z / exp_z.sum();
+            }
+            else {
+                a[i] = z[i].unaryExpr([](double v){return (v > 0) ? v : 0.01 * v;});
+            }
+        }
+        return a.back();
     }
-    Vector SigmoidDerivative(const Vector& x) {
-        return x.cwiseProduct(Vector::Ones(x.size()) - x);
-    }
-    Vector ReLUDerivative(const Vector& x) {
-        return (x.array() > 0).cast<double>().matrix();
+    Vector ReLUDerivative(const Vector& v) {
+        return (v.array() > 0).select(Vector::Ones(v.size()), Vector::Constant(v.size(), 0.01));
     }
     void backward(const Vector& x, const Vector& target) {
-        Vector delta3 = (a3 - target).cwiseProduct(SigmoidDerivative(a3));
-        Vector delta2 = (W3.transpose() * delta3).cwiseProduct(ReLUDerivative(z2));
-        Vector delta1 = (W2.transpose() * delta2).cwiseProduct(ReLUDerivative(z1));
-        
-        dW3 += (delta3 * a2.transpose());
-        db3 += delta3;
-        dW2 += (delta2 * a1.transpose());
-        db2 += delta2;
-        dW1 += (delta1 * x.transpose());
-        db1 += delta1;
-    }
-    void applyGradients(double learningRate, int batchSize) {
-        double factor = learningRate / batchSize;
-        W1 -= factor * dW1; b1 -= factor * db1;
-        W2 -= factor * dW2; b2 -= factor * db2;
-        W3 -= factor * dW3; b3 -= factor * db3;
+        Vector delta = a.back() - target;
 
-        dW1.setZero(); db1.setZero();
-        dW2.setZero(); db2.setZero();
-        dW3.setZero(); db3.setZero();
+        for (int i = W.size() - 1; i >= 0; --i) {
+            const Vector& prev_a = (i == 0) ? x : a[i - 1];
+            // Calculate gradients
+            dW[i] += (delta * prev_a.transpose()) / BatchSize;
+            db[i] += delta / BatchSize;
+
+            if (i > 0) {
+                delta = (W[i].transpose() * delta).cwiseProduct(ReLUDerivative(z[i - 1]));
+            }
+        }
+    }
+    void applyGradients(double learningRate) {
+        t++;
+        const double beta1 = 0.9;
+        const double beta2 = 0.999;
+        const double eps = 1e-8;     // Standard Epsilon
+        const double lambda = 0.0001; // L2 Regularization
+
+        for (size_t i = 0; i < W.size(); ++i) {
+            // Update moments
+            mW[i] = beta1 * mW[i] + (1.0 - beta1) * dW[i];
+            vW[i] = beta2 * vW[i] + (1.0 - beta2) * dW[i].cwiseProduct(dW[i]);
+
+            mb[i] = beta1 * mb[i] + (1.0 - beta1) * db[i];
+            vb[i] = beta2 * vb[i] + (1.0 - beta2) * db[i].cwiseProduct(db[i]);
+
+            // Bias Correction
+            double m_corr = 1.0 / (1.0 - std::pow(beta1, t));
+            double v_corr = 1.0 / (1.0 - std::pow(beta2, t));
+
+            W[i].array() -= learningRate * (
+                (mW[i].array() * m_corr) / ((vW[i].array() * v_corr).sqrt() + eps) +
+                (lambda * W[i].array())
+                );
+
+            b[i].array() -= learningRate * (
+                (mb[i].array() * m_corr) / ((vb[i].array() * v_corr).sqrt() + eps)
+                );
+
+            // Reset Gradients
+            dW[i].setZero();
+            db[i].setZero();
+        }
     }
     void save(const std::string& filename) {
         std::ofstream ofs(filename, std::ios::binary);
-        auto saveWeights = [&](const auto& m) {
-            Index rows = m.rows(), cols = m.cols();
-            ofs.write((char*)&rows, sizeof(Index));
-            ofs.write((char*)&cols, sizeof(Index));
-            ofs.write((char*)m.data(), rows * cols * sizeof(double));
-            };
+        if (!ofs.is_open()) return;
 
-        saveWeights(W1); saveWeights(W2); saveWeights(W3);
-        saveWeights(b1); saveWeights(b2); saveWeights(b3);
+        for (size_t i = 0; i < W.size(); ++i) {
+            // Save raw weight data
+            ofs.write((char*)W[i].data(), W[i].size() * sizeof(double));
+            // Save raw bias data
+            ofs.write((char*)b[i].data(), b[i].size() * sizeof(double));
 
+            ofs.write((char*)mW[i].data(), mW[i].size() * sizeof(double));
+            ofs.write((char*)vW[i].data(), vW[i].size() * sizeof(double));
+            ofs.write((char*)mb[i].data(), mb[i].size() * sizeof(double));
+            ofs.write((char*)vb[i].data(), vb[i].size() * sizeof(double));
+        }
+        ofs.write((char*)&t, sizeof(int)); // Save current Adam timestep
         ofs.close();
     }
+
     void load(const std::string& filename) {
         std::ifstream ifs(filename, std::ios::binary);
-        if (!ifs.is_open()) {
-            std::cerr << "Error: Could not open model file " << filename << std::endl;
-            return;
+        if (!ifs.is_open()) return;
+
+        for (size_t i = 0; i < W.size(); ++i) {
+            // Read raw data directly into the existing allocated memory
+            ifs.read((char*)W[i].data(), W[i].size() * sizeof(double));
+            ifs.read((char*)b[i].data(), b[i].size() * sizeof(double));
+
+            // Load Adam moments
+            ifs.read((char*)mW[i].data(), mW[i].size() * sizeof(double));
+            ifs.read((char*)vW[i].data(), vW[i].size() * sizeof(double));
+            ifs.read((char*)mb[i].data(), mb[i].size() * sizeof(double));
+            ifs.read((char*)vb[i].data(), vb[i].size() * sizeof(double));
         }
-
-        auto loadWeights = [&](auto& m) {
-            Eigen::Index rows, cols;
-            ifs.read((char*)&rows, sizeof(Eigen::Index));
-            ifs.read((char*)&cols, sizeof(Eigen::Index));
-
-            m.resize(rows, cols);
-            ifs.read((char*)m.data(), rows * cols * sizeof(double));
-            };
-
-        loadWeights(W1); loadWeights(W2); loadWeights(W3);
-
-        loadWeights(b1); loadWeights(b2); loadWeights(b3);
-
+        ifs.read((char*)&t, sizeof(int)); // Restore Adam timestep
         ifs.close();
-        std::cout << "Model loaded successfully from " << filename << std::endl;
     }
 };
 std::vector<Vector> loadImages(std::string path) {
@@ -127,7 +167,7 @@ std::vector<Vector> loadImages(std::string path) {
         for (int j = 0; j < 784; j++) {
             unsigned char pixel = 0;
             file.read((char*)&pixel, 1);
-            imgs[i](j) = pixel / 255.0;
+            imgs[i](j) = (pixel / 255.0) - 0.5;
         }
     }
     return imgs;
@@ -146,43 +186,67 @@ std::vector<Vector> loadLabels(std::string path) {
     }
     return lbls;
 }
+Vector augment(const Vector& img) {
+    static std::mt19937 gen(std::random_device{}());
+    static std::uniform_int_distribution<> shift(-1, 1);
+
+    int dx = shift(gen);
+    int dy = shift(gen);
+
+    if (dx == 0 && dy == 0) return img;
+
+    Vector shifted = Vector::Constant(784, -0.5); // Fill with "background" color (-0.5)
+
+    for (int r = 0; r < 28; ++r) {
+        for (int c = 0; c < 28; ++c) {
+            int new_r = r + dy;
+            int new_c = c + dx;
+
+            if (new_r >= 0 && new_r < 28 && new_c >= 0 && new_c < 28) {
+                shifted(new_r * 28 + new_c) = img(r * 28 + c);
+            }
+        }
+    }
+    return shifted;
+}
 int main() {
-    std::cout << "Do you want to save(0) or load(1)?" << '\n';
     int n; std::cin >> n;
-    std::cout << "Loading MNIST dataset..." << '\n';
     std::vector<Vector> train_images = loadImages("train-images.idx3-ubyte");
     std::vector<Vector> train_labels = loadLabels("train-labels.idx1-ubyte");
 
     std::vector<Vector> test_images = loadImages("t10k-images.idx3-ubyte");
     std::vector<Vector> test_labels = loadLabels("t10k-labels.idx1-ubyte");
-
-    int batchsize = 32;
-    double learningrate = 0.05;
-    int epochs = 5;
-    NeuralNetwork nn(784, 32, 16, 10);
+    int batchsize = 128;
+    double learningrate = 0.001;
+    int epochs = 25;
+    NeuralNetwork nn({ 784, 512, 128, 10 }, batchsize);
     if (!n) {
         std::vector<int> indices(train_images.size());
         std::iota(indices.begin(), indices.end(), 0);
-        std::random_device rd;
-        std::mt19937 g(rd());
+        std::random_device rng;
+        std::mt19937 g(rng());
 
         std::cout << "Starting Training..." << '\n';
-        for (int e = 0; e < epochs; e++) {
+        for (int e = 0; e < epochs; ++e) {
             std::shuffle(indices.begin(), indices.end(), g);
 
             for (int i = 0; i < (int)train_images.size(); i += batchsize) {
                 int current_batch = std::min(batchsize, (int)train_images.size() - i);
 
-                for (int b = 0; b < current_batch; b++) {
+                for (int b = 0; b < current_batch; ++b) {
                     int idx = indices[i + b];
-                    nn.forward(train_images[idx]);
-                    nn.backward(train_images[idx], train_labels[idx]);
+
+                    // Augmentation to improve accuraccy
+                    Vector augmented_img = augment(train_images[idx]);
+
+                    nn.forward(augmented_img);
+                    nn.backward(augmented_img, train_labels[idx]);
                 }
-                nn.applyGradients(learningrate, current_batch);
+                nn.applyGradients(learningrate);
             }
 
             int correct = 0;
-            for (int i = 0; i < (int)test_images.size(); i++) {
+            for (int i = 0; i < (int)test_images.size(); ++i) {
                 Vector output = nn.forward(test_images[i]);
                 int prediction, actual;
                 output.maxCoeff(&prediction);
@@ -190,8 +254,11 @@ int main() {
                 if (prediction == actual) correct++;
             }
 
-            std::cout << "Epoch " << e + 1 << " Accuracy: "
-                << (double)correct / test_images.size() * 100.0 << "%" << '\n';
+            double acc = (double)correct / test_images.size() * 100.0;
+            std::cout << "Epoch " << e + 1 << " Accuracy: " << acc << "%" << std::endl;
+
+            // Cut learning rate in half every 5 epochs to fine-tune
+            if ((e + 1) % 5 == 0) learningrate /= 2;
         }
 
         nn.save("mnist_model.bin");
