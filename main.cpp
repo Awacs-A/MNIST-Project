@@ -10,7 +10,7 @@
 using Matrix = Eigen::MatrixXd;
 using Vector = Eigen::VectorXd;
 using Index = Eigen::Index;
-//g++ -O3 -I /usr/include/eigen3 NN.cpp -o NN
+//98.9%
 int reverseInt(int i) {
     unsigned char c1, c2, c3, c4;
     c1 = i & 255; c2 = (i >> 8) & 255; c3 = (i >> 16) & 255; c4 = (i >> 24) & 255;
